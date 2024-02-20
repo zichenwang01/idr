@@ -1,14 +1,15 @@
 import os
-from datetime import datetime
-from pyhocon import ConfigFactory
 import sys
 import torch
+
+from datetime import datetime
+from pyhocon import ConfigFactory
 
 import utils.general as utils
 import utils.plots as plt
 
 class IDRTrainRunner():
-    def __init__(self,**kwargs):
+    def __init__(self, **kwargs):
         torch.set_default_dtype(torch.float32)
         torch.set_num_threads(1)
 
@@ -80,21 +81,25 @@ class IDRTrainRunner():
         if kwargs['scan_id'] != -1:
             dataset_conf['scan_id'] = kwargs['scan_id']
 
-        self.train_dataset = utils.get_class(self.conf.get_string('train.dataset_class'))(self.train_cameras,
-                                                                                          **dataset_conf)
+        self.train_dataset = \
+            utils.get_class(self.conf.get_string('train.dataset_class')) \
+            (self.train_cameras, **dataset_conf)
 
         print('Finish loading data ...')
 
-        self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset,
-                                                            batch_size=self.batch_size,
-                                                            shuffle=True,
-                                                            collate_fn=self.train_dataset.collate_fn
-                                                            )
-        self.plot_dataloader = torch.utils.data.DataLoader(self.train_dataset,
-                                                           batch_size=self.conf.get_int('plot.plot_nimgs'),
-                                                           shuffle=True,
-                                                           collate_fn=self.train_dataset.collate_fn
-                                                           )
+        self.train_dataloader = torch.utils.data.DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            collate_fn=self.train_dataset.collate_fn
+        )
+        
+        self.plot_dataloader = torch.utils.data.DataLoader(
+            self.train_dataset,
+            batch_size=self.conf.get_int('plot.plot_nimgs'),
+            shuffle=True,
+            collate_fn=self.train_dataset.collate_fn
+        )
 
         self.model = utils.get_class(self.conf.get_string('train.model_class'))(conf=self.conf.get_config('model'))
         if torch.cuda.is_available():
@@ -116,6 +121,7 @@ class IDRTrainRunner():
 
             self.optimizer_cam = torch.optim.SparseAdam(self.pose_vecs.parameters(), self.conf.get_float('train.learning_rate_cam'))
 
+        # settings for a continued run
         self.start_epoch = 0
         if is_continue:
             old_checkpnts_dir = os.path.join(self.expdir, timestamp, 'checkpoints')
@@ -158,24 +164,33 @@ class IDRTrainRunner():
     def save_checkpoints(self, epoch):
         torch.save(
             {"epoch": epoch, "model_state_dict": self.model.state_dict()},
-            os.path.join(self.checkpoints_path, self.model_params_subdir, str(epoch) + ".pth"))
+            os.path.join(self.checkpoints_path, self.model_params_subdir, str(epoch) + ".pth")
+        )
+        
         torch.save(
             {"epoch": epoch, "model_state_dict": self.model.state_dict()},
-            os.path.join(self.checkpoints_path, self.model_params_subdir, "latest.pth"))
+            os.path.join(self.checkpoints_path, self.model_params_subdir, "latest.pth")
+        )
 
         torch.save(
             {"epoch": epoch, "optimizer_state_dict": self.optimizer.state_dict()},
-            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, str(epoch) + ".pth"))
+            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, str(epoch) + ".pth")
+        )
+        
         torch.save(
             {"epoch": epoch, "optimizer_state_dict": self.optimizer.state_dict()},
-            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, "latest.pth"))
+            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, "latest.pth")
+        )
 
         torch.save(
             {"epoch": epoch, "scheduler_state_dict": self.scheduler.state_dict()},
-            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, str(epoch) + ".pth"))
+            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, str(epoch) + ".pth")
+        )
+        
         torch.save(
             {"epoch": epoch, "scheduler_state_dict": self.scheduler.state_dict()},
-            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, "latest.pth"))
+            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, "latest.pth")
+        )
 
         if self.train_cameras:
             torch.save(
@@ -200,6 +215,7 @@ class IDRTrainRunner():
             if epoch in self.alpha_milestones:
                 self.loss.alpha = self.loss.alpha * self.alpha_factor
 
+            # save checkpoints
             if epoch % 100 == 0:
                 self.save_checkpoints(epoch)
 
@@ -234,16 +250,11 @@ class IDRTrainRunner():
                 batch_size = ground_truth['rgb'].shape[0]
                 model_outputs = utils.merge_output(res, self.total_pixels, batch_size)
 
-                plt.plot(self.model,
-                         indices,
-                         model_outputs,
-                         model_input['pose'],
-                         ground_truth['rgb'],
-                         self.plots_dir,
-                         epoch,
-                         self.img_res,
-                         **self.plot_conf
-                         )
+                plt.plot(
+                    self.model, indices,
+                    model_outputs, model_input['pose'], ground_truth['rgb'],
+                    self.plots_dir,  epoch, self.img_res, **self.plot_conf
+                )
 
                 self.model.train()
                 if self.train_cameras:
@@ -272,19 +283,31 @@ class IDRTrainRunner():
                 if self.train_cameras:
                     self.optimizer_cam.zero_grad()
 
+                # backpropagate gradients
                 loss.backward()
 
+                # gradient descent one step
                 self.optimizer.step()
                 if self.train_cameras:
                     self.optimizer_cam.step()
 
+                # print parameters
                 print(
-                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, mask_loss = {7}, alpha = {8}, lr = {9}'
-                        .format(self.expname, epoch, data_index, self.n_batches, loss.item(),
-                                loss_output['rgb_loss'].item(),
-                                loss_output['eikonal_loss'].item(),
-                                loss_output['mask_loss'].item(),
-                                self.loss.alpha,
-                                self.scheduler.get_lr()[0]))
+                    f"{self.expname} [{epoch}]"
+                    f"({data_index}/{self.n_batches}): "
+                    f"loss = {loss.item()}, "
+                    f"rgb_loss = {loss_output['rgb_loss'].item()}, "
+                    f"eikonal_loss = {loss_output['eikonal_loss'].item()}, "
+                    f"mask_loss = {loss_output['mask_loss'].item()}, "
+                    f"alpha = {self.loss.alpha}, "
+                    f"lr = {self.scheduler.get_lr()[0]}"
+                )
+
+                # print('{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, mask_loss = {7}, alpha = {8}, lr = {9}'.format(self.expname, epoch, data_index, self.n_batches, loss.item(),
+                #                 loss_output['rgb_loss'].item(),
+                #                 loss_output['eikonal_loss'].item(),
+                #                 loss_output['mask_loss'].item(),
+                #                 self.loss.alpha,
+                #                 self.scheduler.get_lr()[0]))
 
             self.scheduler.step()
