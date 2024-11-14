@@ -101,12 +101,15 @@ class IDRTrainRunner():
             collate_fn=self.train_dataset.collate_fn
         )
 
+        # load model
         self.model = utils.get_class(self.conf.get_string('train.model_class'))(conf=self.conf.get_config('model'))
         if torch.cuda.is_available():
             self.model.cuda()
 
+        # load loss
         self.loss = utils.get_class(self.conf.get_string('train.loss_class'))(**self.conf.get_config('loss'))
 
+        # load optimizer and scheduler
         self.lr = self.conf.get_float('train.learning_rate')
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         self.sched_milestones = self.conf.get_list('train.sched_milestones', default=[])
@@ -207,6 +210,7 @@ class IDRTrainRunner():
                 {"epoch": epoch, "pose_vecs_state_dict": self.pose_vecs.state_dict()},
                 os.path.join(self.checkpoints_path, self.cam_params_subdir, "latest.pth"))
 
+    # -------------------------- MAIN TRAINING LOOP ---------------------------
     def run(self):
         print("training...")
 
@@ -219,6 +223,7 @@ class IDRTrainRunner():
             if epoch % 100 == 0:
                 self.save_checkpoints(epoch)
 
+            # plot
             if epoch % self.plot_freq == 0:
                 self.model.eval()
                 if self.train_cameras:
@@ -274,9 +279,11 @@ class IDRTrainRunner():
                 else:
                     model_input['pose'] = model_input['pose'].cuda()
 
+                # forward pass
                 model_outputs = self.model(model_input)
+                
+                # compute loss
                 loss_output = self.loss(model_outputs, ground_truth)
-
                 loss = loss_output['loss']
 
                 self.optimizer.zero_grad()

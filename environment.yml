@@ -6,9 +6,9 @@ dependencies:
   - _libgcc_mutex=0.1=main
   - _pytorch_select=0.2=gpu_0
   - alabaster=0.7.12=py37_0
-  - anaconda=2019.03=py37_0
-  - anaconda-client=1.7.2=py37_0
-  - anaconda-project=0.8.2=py37_0
+  # - anaconda=2019.03=py37_0
+  # - anaconda-client=1.7.2=py37_0
+  # - anaconda-project=0.8.2=py37_0
   - asn1crypto=0.24.0=py37_0
   - astroid=2.2.5=py37_0
   - astropy=3.1.2=py37h7b6447c_0

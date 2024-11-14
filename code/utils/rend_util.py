@@ -16,7 +16,8 @@ def load_rgb(path):
     return img
 
 def load_mask(path):
-    alpha = imageio.imread(path, as_gray=True)
+    # alpha = imageio.imread(path, as_gray=True) # deprecated
+    alpha = imageio.imread(path, mode='F')
     alpha = skimage.img_as_float32(alpha)
     object_mask = alpha > 127.5
 
@@ -139,8 +140,18 @@ def rot_to_quat(R):
     return q
 
 def get_sphere_intersection(cam_loc, ray_directions, r = 1.0):
-    # Input: n_images x 4 x 4 ; n_images x n_rays x 3
-    # Output: n_images * n_rays x 2 (close and far) ; n_images * n_rays
+    """
+    Calculate the intersection points of rays with a sphere.
+
+    Parameters:
+        cam_loc (torch.Tensor): Camera locations of shape (n_images, 4, 4).
+        ray_directions (torch.Tensor): Ray directions of shape (n_images, n_rays, 3).
+        r (float): Radius of the sphere. Default is 1.0.
+
+    Returns:
+        torch.Tensor: Intersection points of shape (n_images, n_rays, 2) (close and far).
+        torch.Tensor: Mask indicating which rays intersect the sphere of shape (n_images, n_rays).
+    """
 
     n_imgs, n_pix, _ = ray_directions.shape
 

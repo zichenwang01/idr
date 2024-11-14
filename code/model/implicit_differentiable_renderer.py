@@ -5,6 +5,7 @@ import numpy as np
 from utils import rend_util
 from model.embedder import *
 from model.ray_tracing import RayTracing
+from model.diff_ray_tracer import DiffRayTracer
 from model.sample_network import SampleNetwork
 
 class ImplicitNetwork(nn.Module):
@@ -98,14 +99,14 @@ class ImplicitNetwork(nn.Module):
 
 class RenderingNetwork(nn.Module):
     def __init__(
-            self,
-            feature_vector_size,
-            mode,
-            d_in,
-            d_out,
-            dims,
-            weight_norm=True,
-            multires_view=0
+        self,
+        feature_vector_size,
+        mode,
+        d_in,
+        d_out,
+        dims,
+        weight_norm=True,
+        multires_view=0
     ):
         super().__init__()
 
@@ -133,9 +134,11 @@ class RenderingNetwork(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, points, normals, view_dirs, feature_vectors):
+        # view direction embedding
         if self.embedview_fn is not None:
             view_dirs = self.embedview_fn(view_dirs)
 
+        # check the mode
         if self.mode == 'idr':
             rendering_input = torch.cat([points, view_dirs, normals, feature_vectors], dim=-1)
         elif self.mode == 'no_view_dir':
@@ -160,10 +163,19 @@ class IDRNetwork(nn.Module):
     def __init__(self, conf):
         super().__init__()
         self.feature_vector_size = conf.get_int('feature_vector_size')
+        
+        # SDF network
         self.implicit_network = ImplicitNetwork(self.feature_vector_size, **conf.get_config('implicit_network'))
+        
+        # Appearance network
         self.rendering_network = RenderingNetwork(self.feature_vector_size, **conf.get_config('rendering_network'))
+        
+        # Ray Tracer
         self.ray_tracer = RayTracing(**conf.get_config('ray_tracer'))
+        
+        # Reparameterization
         self.sample_network = SampleNetwork()
+        
         self.object_bounding_sphere = conf.get_float('ray_tracer.object_bounding_sphere')
 
     def forward(self, input):
@@ -178,12 +190,15 @@ class IDRNetwork(nn.Module):
 
         batch_size, num_pixels, _ = ray_dirs.shape
 
-        self.implicit_network.eval()
+        # Ray tracing
+        self.implicit_network.eval() 
         with torch.no_grad():
-            points, network_object_mask, dists = self.ray_tracer(sdf=lambda x: self.implicit_network(x)[:, 0],
-                                                                 cam_loc=cam_loc,
-                                                                 object_mask=object_mask,
-                                                                 ray_directions=ray_dirs)
+            points, network_object_mask, dists = self.ray_tracer(
+                sdf=lambda x: self.implicit_network(x)[:, 0],
+                cam_loc=cam_loc,
+                object_mask=object_mask,
+                ray_directions=ray_dirs
+            )
         self.implicit_network.train()
 
         points = (cam_loc.unsqueeze(1) + dists.reshape(batch_size, num_pixels, 1) * ray_dirs).reshape(-1, 3)
@@ -200,7 +215,7 @@ class IDRNetwork(nn.Module):
             surface_output = sdf_output[surface_mask]
             N = surface_points.shape[0]
 
-            # Sample points for the eikonal loss
+            # Eikonal points
             eik_bounding_box = self.object_bounding_sphere
             n_eik_points = batch_size * num_pixels // 2
             eikonal_points = torch.empty(n_eik_points, 3).uniform_(-eik_bounding_box, eik_bounding_box).cuda()
@@ -217,12 +232,15 @@ class IDRNetwork(nn.Module):
             surface_points_grad = g[:N, 0, :].clone().detach()
             grad_theta = g[N:, 0, :]
 
-            differentiable_surface_points = self.sample_network(surface_output,
-                                                                surface_sdf_values,
-                                                                surface_points_grad,
-                                                                surface_dists,
-                                                                surface_cam_loc,
-                                                                surface_ray_dirs)
+            # Reparameterization
+            differentiable_surface_points = self.sample_network(
+                surface_output,
+                surface_sdf_values,
+                surface_points_grad,
+                surface_dists,
+                surface_cam_loc,
+                surface_ray_dirs
+            )
 
         else:
             surface_mask = network_object_mask
@@ -253,5 +271,120 @@ class IDRNetwork(nn.Module):
 
         feature_vectors = output[:, 1:]
         rgb_vals = self.rendering_network(points, normals, view_dirs, feature_vectors)
+
+        return rgb_vals
+
+class SDRNetwork(nn.Module):
+    def __init__(self, conf):
+        super().__init__()
+        self.feature_vector_size = conf.get_int('feature_vector_size')
+        
+        # SDF network
+        self.sdf_network = ImplicitNetwork(self.feature_vector_size, **conf.get_config('implicit_network'))
+        
+        # Appearance network
+        self.radiance_network = RenderingNetwork(self.feature_vector_size, **conf.get_config('rendering_network'))
+        
+        # Ray Tracer
+        self.ray_tracer = DiffRayTracer(**conf.get_config('ray_tracer'))
+        
+        self.object_bounding_sphere = conf.get_float('ray_tracer.object_bounding_sphere')
+
+    def forward(self, input):
+
+        # Parse model input
+        intrinsics = input["intrinsics"]
+        uv = input["uv"]
+        pose = input["pose"]
+        object_mask = input["object_mask"].reshape(-1)
+
+        ray_dirs, cam_loc = rend_util.get_camera_params(uv, pose, intrinsics)
+
+        batch_size, num_pixels, _ = ray_dirs.shape
+
+        # Sphere tracing
+        self.sdf_network.eval() 
+        with torch.no_grad():
+            points, network_object_mask, dists = self.ray_tracer(
+                sdf=lambda x: self.sdf_network(x)[:, 0],
+                cam_loc=cam_loc,
+                object_mask=object_mask,
+                ray_directions=ray_dirs
+            )
+        self.sdf_network.train()
+
+        points = (cam_loc.unsqueeze(1) + dists.reshape(batch_size, num_pixels, 1) * ray_dirs).reshape(-1, 3)
+
+        sdf_output = self.sdf_network(points)[:, 0:1]
+        ray_dirs = ray_dirs.reshape(-1, 3)
+
+        if self.training:
+            surface_mask = network_object_mask & object_mask
+            surface_points = points[surface_mask]
+            surface_dists = dists[surface_mask].unsqueeze(-1)
+            surface_ray_dirs = ray_dirs[surface_mask]
+            surface_cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[surface_mask]
+            surface_output = sdf_output[surface_mask]
+            N = surface_points.shape[0]
+
+            # Eikonal points
+            eik_bounding_box = self.object_bounding_sphere
+            n_eik_points = batch_size * num_pixels // 2
+            eikonal_points = torch.empty(n_eik_points, 3).uniform_(-eik_bounding_box, eik_bounding_box).cuda()
+            eikonal_pixel_points = points.clone()
+            eikonal_pixel_points = eikonal_pixel_points.detach()
+            eikonal_points = torch.cat([eikonal_points, eikonal_pixel_points], 0)
+
+            points_all = torch.cat([surface_points, eikonal_points], dim=0)
+
+            output = self.sdf_network(surface_points)
+            surface_sdf_values = output[:N, 0:1].detach()
+
+            g = self.sdf_network.gradient(points_all)
+            surface_points_grad = g[:N, 0, :].clone().detach()
+            grad_theta = g[N:, 0, :]
+
+            # # Reparameterization
+            # differentiable_surface_points = self.sample_network(
+            #     surface_output,
+            #     surface_sdf_values,
+            #     surface_points_grad,
+            #     surface_dists,
+            #     surface_cam_loc,
+            #     surface_ray_dirs
+            # )
+
+        else:
+            surface_mask = network_object_mask
+            differentiable_surface_points = points[surface_mask]
+            grad_theta = None
+
+        view = -ray_dirs[surface_mask]
+
+        # rgb_values = torch.ones_like(points).float().cuda()
+        # if differentiable_surface_points.shape[0] > 0:
+        #     rgb_values[surface_mask] = self.get_rbg_value(differentiable_surface_points, view)
+
+        rgb_values = torch.ones_like(points).float().cuda()
+        rgb_values[surface_mask] = self.get_rbg_value(points, view)
+
+        output = {
+            'points': points,
+            'rgb_values': rgb_values,
+            'sdf_output': sdf_output,
+            'network_object_mask': network_object_mask,
+            'object_mask': object_mask,
+            'grad_theta': grad_theta
+        }
+
+        return output
+
+    def get_rbg_value(self, points, view_dirs):
+        output = self.sdf_network(points)
+        g = self.sdf_network.gradient(points)
+        normals = g[:, 0, :]
+
+        feature_vectors = output[:, 1:]
+        rgb_vals = self.radiance_network(points, normals, view_dirs, feature_vectors)
 
         return rgb_vals
